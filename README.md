@@ -17,7 +17,7 @@ pip install -e .
 cat-digest
 ```
 
-On first run, CAT Digest offers to create your config (users and Smartsheet URLs) at `~/.config/cat-digest/config.yaml`. Results are saved under `outputs/`.
+On first run, CAT Digest offers to create your config (users and Smartsheet URLs) at `~/.config/cat-digest/config.yaml`. Results are saved under `catdigests/`.
 
 ## Configuration
 
@@ -48,7 +48,7 @@ Smartsheet rows are matched to people by `Submitted By` name or a contact/email 
 | `--smartsheet-days N`, `--github-days N` | Lookback per source (default 30). |
 | `--start-date`, `--end-date` | Inclusive `YYYY-MM-DD` range for both sources; use together. Overrides lookback days. |
 | `--smartsheet-date-column TITLE` | Date column to use if auto-detection picks the wrong one. |
-| `--output-dir DIR` | Where output is written (default `outputs/`). |
+| `--output-dir DIR` | Where output is written (default `catdigests/`). Existing files and directories are never overwritten or deleted; a colliding run directory gets a `-2`, `-3`, … suffix. |
 | `--[no-]llm` | Generate (or skip) per-person LLM reports. |
 | `--llm-config FILE` | Use this LLM settings file instead of the defaults below. |
 | `--model MODEL[/LEVEL]` | Gemini model and thinking level, e.g. `gemini-3.8-flash/low`. Required without a terminal. |

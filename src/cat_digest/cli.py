@@ -217,9 +217,18 @@ def get_api_token(environment_variable: str) -> str:
     return token.strip()
 
 
+def unique_output_name(root: Path, name: str) -> str:
+    candidate, suffix = name, 1
+    while (root / candidate).exists():
+        suffix += 1
+        candidate = f"{name}-{suffix}"
+    return candidate
+
+
 def init_config() -> int:
     path = default_config_path()
-    if path.exists() and input(f"{path} exists; overwrite? [y/N] ").strip().casefold() != "y":
+    if path.exists():
+        LOG.error("%s already exists; edit it directly or move it aside first", path)
         return 1
     name = input("Name: ").strip()
     email = input("Email: ").strip()
@@ -303,8 +312,8 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("outputs"),
-        help="Root directory under which CAT-Digest-YYYY-MM-DD-HH-MMZ output directories are created (default: outputs/).",
+        default=Path("catdigests"),
+        help="Root directory under which CAT-Digest-YYYY-MM-DD-HH-MMZ output directories are created (default: catdigests/; existing files are never overwritten).",
     )
     parser.add_argument(
         "--llm",
@@ -600,7 +609,7 @@ def main(argv: list[str] | None = None) -> int:
             include_github=include_github,
             period=period,
         )
-        output_name = default_output_name(now)
+        output_name = unique_output_name(args.output_dir, default_output_name(now))
         output_dir = args.output_dir / output_name
         output_path = write_document(output_dir / f"{output_name}.txt", content)
     except Exception:

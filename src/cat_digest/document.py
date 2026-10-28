@@ -90,7 +90,8 @@ def render_document(
 
 def write_document(path: Path, content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(content)
     return path
 
 

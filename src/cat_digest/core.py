@@ -250,5 +250,6 @@ def write_config(path: str | Path, people: list[Person], urls: list[str]) -> Pat
         ],
         "smartsheet_report_urls": [url.strip() for url in urls],
     }
-    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    with path.open("x", encoding="utf-8") as handle:
+        yaml.safe_dump(data, handle, sort_keys=False)
     return path

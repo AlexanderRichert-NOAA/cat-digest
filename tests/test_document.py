@@ -112,3 +112,14 @@ def test_document_labels_background_items_that_are_not_period_work():
     assert "Original report" in text
     assert "   Created:" not in text
     assert "Comment (2026-10-02): Update" in text
+
+
+def test_write_document_never_overwrites(tmp_path):
+    import pytest
+
+    from cat_digest.document import write_document
+
+    path = write_document(tmp_path / "d" / "a.txt", "one")
+    with pytest.raises(FileExistsError):
+        write_document(path, "two")
+    assert path.read_text() == "one"
