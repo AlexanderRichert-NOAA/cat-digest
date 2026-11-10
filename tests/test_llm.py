@@ -56,6 +56,56 @@ def test_generate_report_sends_key_in_header_and_returns_text(monkeypatch):
     assert seen["body"]["contents"][0]["parts"][0]["text"] == "raw"
 
 
+def test_generate_report_saves_prompt_before_each_attempt(tmp_path, monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="cat_digest")
+    request_path = tmp_path / "Ann-One-llm-prompt.txt"
+    saved = []
+
+    def fake_urlopen(request, timeout):
+        path = request_path if not saved else tmp_path / "Ann-One-llm-prompt-2.txt"
+        assert path.read_text(encoding="utf-8") == "system\n\nraw"
+        body = json.loads(request.data)
+        assert body["systemInstruction"]["parts"][0]["text"] == "system"
+        assert body["contents"][0]["parts"][0]["text"] == "raw"
+        saved.append(path)
+        if len(saved) == 1:
+            raise llm.urllib.error.URLError("offline")
+        return io.BytesIO(json.dumps(
+            {"candidates": [{"content": {"parts": [{"text": "Summary"}]}}]}
+        ).encode())
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    config = LLMConfig("p", "model-x", thinking_level="high")
+    with pytest.raises(llm.LLMError, match="offline"):
+        generate_report(config, "secret", "system", "raw", request_path=request_path)
+    result = generate_report(config, "secret", "system", "raw", request_path=request_path)
+
+    assert result == "Summary\n"
+    assert len(saved) == 2
+    assert "model-x" in caplog.text
+    assert '"temperature": 0.2' in caplog.text
+    assert '"thinkingLevel": "high"' in caplog.text
+    assert "secret" not in caplog.text
+    assert "secret" not in request_path.read_text()
+
+
+def test_generate_report_does_not_send_if_request_cannot_be_saved(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        llm.urllib.request, "urlopen",
+        lambda *args, **kwargs: pytest.fail("request sent before saving"),
+    )
+    existing_file = tmp_path / "not-a-directory"
+    existing_file.write_text("unchanged")
+    with pytest.raises(OSError):
+        generate_report(
+            LLMConfig("p"), "secret", "system", "raw",
+            request_path=existing_file / "request.json",
+        )
+    assert existing_file.read_text() == "unchanged"
+
+
 def test_extract_text_reports_empty_response():
     with pytest.raises(RuntimeError, match="SAFETY"):
         extract_text({"candidates": [{"finishReason": "SAFETY"}]})
@@ -152,3 +202,11 @@ def test_default_config_uses_packaged_then_user_override(tmp_path, monkeypatch):
 
     assert merged.model == "custom"
     assert merged.prompt == packaged.prompt
+
+
+def test_packaged_prompt_distinguishes_commit_activity_from_pr_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    prompt = load_llm_config().prompt
+    assert "Whole-PR snapshot metrics" in prompt
+    assert "only these dated commits" in prompt
+    assert "not a net diff or a reliable" in prompt

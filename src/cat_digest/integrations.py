@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from .core import Person, SheetRef, filter_smartsheet_rows
@@ -19,6 +19,23 @@ class GitHubComment:
 
 
 @dataclass(frozen=True)
+class GitHubCommit:
+    sha: str
+    authored_at: datetime
+    message: str
+    additions: int
+    deletions: int
+
+
+@dataclass(frozen=True)
+class PullRequestMetrics:
+    commits: int
+    additions: int
+    deletions: int
+    period_commits: tuple[GitHubCommit, ...]
+
+
+@dataclass(frozen=True)
 class GitHubEntry:
     kind: str
     title: str
@@ -30,6 +47,7 @@ class GitHubEntry:
     comments: tuple[GitHubComment, ...]
     status: str | None = None
     authored_in_period: bool = True
+    pr_metrics: PullRequestMetrics | None = None
 
 
 def _fetch_sheet(client: Any, ref: SheetRef, page_size: int = 10_000) -> tuple[Any, list[Any]]:
@@ -101,11 +119,56 @@ def _within(
     return normalized >= cutoff and (end_date is None or normalized <= end_date)
 
 
+def _pull_request_metrics(
+    pull: Any, expected_login: str, cutoff: datetime, end_date: datetime | None,
+) -> PullRequestMetrics:
+    commit_count = pull.commits
+    if commit_count > 250:
+        raise RuntimeError(
+            f"Cannot collect complete commit activity for {pull.html_url}: "
+            f"GitHub's pull request commits endpoint is limited to 250 commits "
+            f"(PR reports {commit_count})"
+        )
+    commits = list(pull.get_commits())
+    if len(commits) != commit_count:
+        raise RuntimeError(
+            f"Incomplete commit list for {pull.html_url}: "
+            f"expected {commit_count}, received {len(commits)}; retry collection"
+        )
+    matching = []
+    for commit in commits:
+        if _login(commit.author).casefold() != expected_login:
+            continue
+        authored_at = commit.commit.author.date if commit.commit.author else None
+        if authored_at is None:
+            raise RuntimeError(f"Missing commit author date for {commit.sha} in {pull.html_url}")
+        if not _within(authored_at, cutoff, end_date):
+            continue
+        stats = commit.stats
+        if stats is None:
+            raise RuntimeError(f"Missing commit statistics for {commit.sha} in {pull.html_url}")
+        matching.append(GitHubCommit(
+            sha=commit.sha,
+            authored_at=authored_at,
+            message=commit.commit.message or "",
+            additions=stats.additions,
+            deletions=stats.deletions,
+        ))
+    matching.sort(key=lambda commit: (commit.authored_at, commit.sha))
+    return PullRequestMetrics(
+        commits=commit_count,
+        additions=pull.additions,
+        deletions=pull.deletions,
+        period_commits=tuple(matching),
+    )
+
+
 def collect_github(
     person: Person,
     token: str,
     cutoff: datetime,
     end_date: datetime | None = None,
+    as_of: datetime | None = None,
 ) -> list[GitHubEntry]:
     from github import Auth, Github
 
@@ -130,6 +193,37 @@ def collect_github(
                 hits += 1
             LOG.debug("GitHub search returned %d result(s)", hits)
 
+    commit_end = end_date or as_of or datetime.now(timezone.utc)
+    commit_filter = f"author-date:{cutoff_date}..{commit_end.date().isoformat()}"
+    query = f"author:{person.github_user} {commit_filter}"
+    LOG.debug("GitHub commit search: %s", query)
+    LOG.debug(
+        "GitHub commit-only PR discovery is best-effort: search covers default "
+        "branches only and may return incomplete results"
+    )
+    commit_hits = 0
+    discovered_pulls: dict[str, Any] = {}
+    search_results = github.search_commits(query=query)
+    incomplete_search = False
+    for commit in search_results:
+        incomplete_search |= bool(getattr(search_results, "incomplete_results", False))
+        commit_hits += 1
+        for pull in commit.get_pulls():
+            if pull.html_url not in found:
+                found[pull.html_url] = pull.as_issue()
+                discovered_pulls[pull.html_url] = pull
+        if commit_hits == 1000:
+            break
+    incomplete_search |= bool(getattr(search_results, "incomplete_results", False))
+    if incomplete_search:
+        LOG.warning("GitHub reported incomplete commit search results for %s", person.github_user)
+    if commit_hits >= 1000:
+        LOG.warning(
+            "GitHub commit search reached the 1,000-result limit for %s; "
+            "commit-only PR discovery may be incomplete", person.github_user,
+        )
+    LOG.debug("GitHub commit search returned %d result(s)", commit_hits)
+
     entries: list[GitHubEntry] = []
     expected_login = person.github_user.casefold()
     LOG.debug("GitHub: %d unique item(s) to inspect for %s", len(found), person.github_user)
@@ -151,14 +245,18 @@ def collect_github(
 
         is_pull_request = getattr(issue, "pull_request", None) is not None
         status = None
+        pr_metrics = None
         if is_pull_request:
             LOG.debug("GitHub: fetching pull request details and reviews for %s", issue.html_url)
-            pull = issue.repository.get_pull(issue.number)
+            pull = discovered_pulls.get(issue.html_url)
+            if pull is None:
+                pull = issue.repository.get_pull(issue.number)
             status = (
                 "merged"
                 if pull.is_merged()
                 else f"draft ({pull.state})" if pull.draft else pull.state
             )
+            pr_metrics = _pull_request_metrics(pull, expected_login, cutoff, commit_end)
             for comment in pull.get_review_comments():
                 if (
                     _login(comment.user).casefold() == expected_login
@@ -185,11 +283,8 @@ def collect_github(
                     ))
 
         comments.sort(key=lambda item: item.created_at)
-        # Activity by other people (which bumps updated_at) is not this person's work, so an
-        # authored item counts only if it was created in the window; otherwise it needs
-        # in-window comments or reviews and its body is background context only.
         authored_in_period = authored and _within(issue.created_at, cutoff, end_date)
-        if not authored_in_period and not comments:
+        if not authored_in_period and not comments and not (pr_metrics and pr_metrics.period_commits):
             continue
         entries.append(GitHubEntry(
             kind="Pull request" if is_pull_request else "Issue",
@@ -208,7 +303,6 @@ def collect_github(
             comments=tuple(comments),
             status=status,
             authored_in_period=authored_in_period,
+            pr_metrics=pr_metrics,
         ))
     return sorted(entries, key=lambda item: item.created_at)
-
-

@@ -173,9 +173,10 @@ def test_github_token_prompt_describes_required_permissions(monkeypatch):
     monkeypatch.setattr(questionary, "password", password)
 
     assert get_api_token("GITHUB_TOKEN") == "github-token"
-    assert "fine-grained PAT or App installation token" in prompt["message"]
+    assert "fine-grained PAT" in prompt["message"]
     assert "Issues: read" in prompt["message"]
     assert "Pull requests: read" in prompt["message"]
+    assert "Contents: read" in prompt["message"]
 
 
 def test_get_api_token_explains_noninteractive_environment_requirement(monkeypatch):
@@ -232,14 +233,213 @@ def test_summarize_from_generates_only_missing_reports(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(
         cli, "generate_report",
-        lambda config, key, prompt, raw: seen.append((prompt, raw, config.model, config.thinking_level)) or "summary\n",
+        lambda config, key, prompt, raw, **kwargs: seen.append((prompt, raw, config.model, config.thinking_level, kwargs["request_path"])) or "summary\n",
     )
 
     status = cli.main(["--summarize-from", str(tmp_path), "--llm-config", str(tmp_path / "llm.toml"), "--model", "m/low"])
 
     assert status == 0
-    assert seen == [("Summarize Bob Two", "Bob Two\n=======\n\nraw b\n", "m", "low")]
+    assert seen == [("Summarize Bob Two", "Bob Two\n=======\n\nraw b\n", "m", "low", tmp_path / "Bob-Two-llm-prompt.txt")]
     assert (tmp_path / "Bob-Two.txt").read_text() == "summary\n"
+
+
+def test_summarize_from_saves_copyable_prompt(tmp_path, monkeypatch, capsys):
+    import io
+    import json
+
+    from cat_digest import cli, llm
+
+    (tmp_path / "CAT-Digest-x.txt").write_text(
+        "CAT Digest | 2026-10-15\nPeriod: 2026-09-15 to 2026-10-15\n\n"
+        "Ann One\n=======\n\nraw a\n"
+    )
+    (tmp_path / "llm.toml").write_text('prompt = "Summarize {name} for {start_date}"\n')
+    monkeypatch.setenv("GEMINI_API_KEY", "secret")
+    sent = []
+
+    def fake_urlopen(request, timeout):
+        sent.append(request.data)
+        return io.BytesIO(json.dumps(
+            {"candidates": [{"content": {"parts": [{"text": "summary"}]}}]}
+        ).encode())
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    status = cli.main([
+        "--summarize-from", str(tmp_path), "--llm-config", str(tmp_path / "llm.toml"),
+        "--model", "m/low", "--print-llm-prompts",
+    ])
+
+    assert status == 0
+    body = json.loads(sent[0])
+    assert body["systemInstruction"]["parts"][0]["text"] == "Summarize Ann One for 2026-09-15"
+    assert body["contents"][0]["parts"][0]["text"] == "Ann One\n=======\n\nraw a\n"
+    assert (tmp_path / "Ann-One-llm-prompt.txt").read_text() == (
+        "Summarize Ann One for 2026-09-15\n\nAnn One\n=======\n\nraw a\n"
+    )
+    assert (tmp_path / "Ann-One-llm-prompt.txt").read_text() in capsys.readouterr().out
+    assert (tmp_path / "Ann-One.txt").read_text() == "summary\n"
+
+
+def test_summarize_from_prompts_only_needs_no_gemini_and_keeps_existing_files(tmp_path, monkeypatch, capsys):
+    from cat_digest import cli, llm
+
+    (tmp_path / "CAT-Digest-x.txt").write_text(
+        "CAT Digest | 2026-10-15\nPeriod: 2026-09-15 to 2026-10-15\n\n"
+        "Ann One\n=======\n\nraw a\n"
+    )
+    (tmp_path / "Ann-One.txt").write_text("existing report\n")
+    (tmp_path / "Ann-One-llm-prompt.txt").write_text("existing prompt\n")
+    (tmp_path / "llm.toml").write_text('prompt = "Summarize {name} for {start_date}"\n')
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(cli, "get_api_token", lambda *a: pytest.fail("unexpected token request"))
+    monkeypatch.setattr(cli, "select_model", lambda *a: pytest.fail("unexpected model selection"))
+    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda *a, **k: pytest.fail("unexpected network request"))
+
+    status = cli.main([
+        "--summarize-from", str(tmp_path), "--llm-config", str(tmp_path / "llm.toml"),
+        "--llm-prompts-only", "--print-llm-prompts",
+    ])
+
+    assert status == 0
+    assert (tmp_path / "Ann-One-llm-prompt-2.txt").read_text() == (
+        "Summarize Ann One for 2026-09-15\n\nAnn One\n=======\n\nraw a\n"
+    )
+    assert (tmp_path / "Ann-One-llm-prompt.txt").read_text() == "existing prompt\n"
+    assert (tmp_path / "Ann-One.txt").read_text() == "existing report\n"
+    stdout = capsys.readouterr().out
+    assert "===== LLM prompt: Ann-One-llm-prompt-2.txt =====" in stdout
+    assert (tmp_path / "Ann-One-llm-prompt-2.txt").read_text() in stdout
+    assert "===== End LLM prompt: Ann-One-llm-prompt-2.txt =====" in stdout
+
+
+def test_new_digest_prompts_only_skips_gemini(tmp_path, monkeypatch, capsys):
+    from cat_digest import cli, llm
+    from cat_digest.integrations import GitHubEntry
+
+    person = Person("Ann One", "ann@example.com", "ann")
+    timestamp = datetime(2026, 9, 20, tzinfo=timezone.utc)
+    entry = GitHubEntry(
+        "Issue", "A task", "https://github.com/x/y/issues/1", timestamp,
+        "Work details", "ann", (), (),
+    )
+    (tmp_path / "llm.toml").write_text('prompt = "Summarize {name} for {start_date}"\n')
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(cli, "offer_init_config", lambda args: None)
+    monkeypatch.setattr(cli, "load_users", lambda: {person.email: person})
+    monkeypatch.setattr(cli, "get_api_token", lambda name: "github-key" if name == "GITHUB_TOKEN" else pytest.fail("unexpected Gemini token request"))
+    monkeypatch.setattr(cli, "collect_github", lambda *a, **k: [entry])
+    monkeypatch.setattr(cli, "select_model", lambda *a: pytest.fail("unexpected model selection"))
+    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda *a, **k: pytest.fail("unexpected network request"))
+
+    status = cli.main([
+        "--all-users", "--no-smartsheet", "--github", "--llm-prompts-only", "--print-llm-prompts",
+        "--start-date", "2026-09-01", "--end-date", "2026-09-30",
+        "--output-dir", str(tmp_path), "--llm-config", str(tmp_path / "llm.toml"),
+    ])
+
+    assert status == 0
+    prompt, = tmp_path.glob("CAT-Digest-*/Ann-One-llm-prompt.txt")
+    assert prompt.read_text().startswith("Summarize Ann One for 2026-09-01\n\n")
+    assert "Work details" in prompt.read_text()
+    assert prompt.read_text() in capsys.readouterr().out
+    assert not (prompt.parent / "Ann-One.txt").exists()
+    assert list(prompt.parent.glob("CAT-Digest-*.txt"))
+
+
+def test_prompts_only_rejects_no_llm():
+    from cat_digest import cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--llm-prompts-only", "--no-llm"])
+    assert exc.value.code == 2
+
+
+def test_print_prompts_rejects_no_llm():
+    from cat_digest import cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--print-llm-prompts", "--no-llm"])
+    assert exc.value.code == 2
+
+
+def test_prompts_only_reports_save_errors(tmp_path, monkeypatch, caplog):
+    from cat_digest import cli, llm
+
+    monkeypatch.setattr(cli, "save_prompt", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    status = cli.save_prompts(
+        {"Ann One": "raw"}, (date(2026, 9, 1), date(2026, 9, 30)),
+        llm.LLMConfig("Prompt"), tmp_path,
+    )
+    assert status == 1
+    assert "Ann One" in caplog.text and "disk full" in caplog.text
+
+
+def test_generate_reports_saves_each_persons_request(tmp_path, monkeypatch, capsys):
+    import io
+    import json
+
+    from cat_digest import cli, llm
+
+    bodies = []
+
+    def fake_urlopen(request, timeout):
+        bodies.append(request.data)
+        return io.BytesIO(json.dumps(
+            {"candidates": [{"content": {"parts": [{"text": "summary"}]}}]}
+        ).encode())
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    status = cli.generate_reports(
+        {"Ann One": "Ann raw", "Bob Two": "Bob raw"},
+        (date(2026, 9, 1), date(2026, 9, 30)),
+        llm.LLMConfig("Summarize {name}"), "secret", tmp_path, False, tmp_path / "digest.txt",
+    )
+
+    assert status == 0
+    assert (tmp_path / "Ann-One-llm-prompt.txt").read_text() == "Summarize Ann One\n\nAnn raw"
+    assert (tmp_path / "Bob-Two-llm-prompt.txt").read_text() == "Summarize Bob Two\n\nBob raw"
+    assert json.loads(bodies[0])["contents"][0]["parts"][0]["text"] == "Ann raw"
+    assert json.loads(bodies[1])["contents"][0]["parts"][0]["text"] == "Bob raw"
+    assert (tmp_path / "Ann-One.txt").read_text() == "summary\n"
+    assert (tmp_path / "Bob-Two.txt").read_text() == "summary\n"
+    assert "===== LLM prompt:" not in capsys.readouterr().out
+
+
+def test_generate_reports_prints_saved_prompt_before_request_and_retries(tmp_path, monkeypatch, capsys):
+    import io
+    import json
+
+    from cat_digest import cli, llm
+
+    attempts = []
+    printed = []
+
+    def fake_urlopen(request, timeout):
+        stdout = capsys.readouterr().out
+        printed.append(stdout)
+        name = "Ann-One-llm-prompt.txt" if not attempts else "Ann-One-llm-prompt-2.txt"
+        assert (tmp_path / name).read_text() in stdout
+        assert f"===== LLM prompt: {name} =====" in stdout
+        attempts.append(name)
+        if len(attempts) == 1:
+            raise llm.urllib.error.URLError("offline")
+        return io.BytesIO(json.dumps(
+            {"candidates": [{"content": {"parts": [{"text": "summary"}]}}]}
+        ).encode())
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        questionary, "select", lambda *a, **k: SimpleNamespace(ask=lambda: "retry"),
+    )
+    status = cli.generate_reports(
+        {"Ann One": "Ann raw"}, (date(2026, 9, 1), date(2026, 9, 30)),
+        llm.LLMConfig("Summarize {name}"), "secret", tmp_path, True,
+        tmp_path / "digest.txt", print_prompts=True,
+    )
+
+    assert status == 0
+    assert len(attempts) == 2
+    assert all("secret" not in text for text in printed)
 
 
 def test_select_model_requires_flag_without_terminal():
@@ -293,7 +493,7 @@ def test_report_failure_offers_manual_retry_then_exits(tmp_path, monkeypatch, ca
 
     attempts = []
 
-    def flaky(config, key, prompt, raw):
+    def flaky(config, key, prompt, raw, **kwargs):
         attempts.append(1)
         if len(attempts) < 3:
             raise LLMError("503 busy", retryable=True)
@@ -312,7 +512,7 @@ def test_report_failure_offers_manual_retry_then_exits(tmp_path, monkeypatch, ca
 
     attempts.clear()
     answers = iter(["exit"])
-    monkeypatch.setattr(cli, "generate_report", lambda *a: (_ for _ in ()).throw(LLMError("503", True)))
+    monkeypatch.setattr(cli, "generate_report", lambda *a, **k: (_ for _ in ()).throw(LLMError("503", True)))
     assert cli.generate_reports(sections, period, LLMConfig("p"), "k", tmp_path, True, tmp_path / "d.txt") == 1
     assert "--summarize-from" in capsys.readouterr().out
 

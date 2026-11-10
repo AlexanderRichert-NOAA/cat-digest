@@ -26,6 +26,19 @@ WHAT COUNTS
   but never report the item itself, or anything that happened outside the period,
   as their work.
 - Items without that label were created by the person during the period.
+- Whole-PR snapshot metrics describe the current PR across all authors and dates,
+  potentially including work after the period. They are context only, not necessarily evidence
+  of this person's in-period work. Selected-person in-period commits are matched by
+  GitHub author and author date; use only these dated commits as evidence of their
+  commit activity. Author dates do not necessarily indicate when commits were pushed.
+  Summed per-commit additions and deletions are churn, not a net diff or a reliable
+  measure of effort, and may count the same lines more than once. Collectively, this
+  information should be used as one way to help infer relative extent of effort for
+  some given development activity. For instance, one commit contributed to someone
+  else's PR could be described as "Assisted in the development of a new feature,"
+  whereas many commits and/or a user-contributed PR with many lines changed should
+  be phrased more strongly, e.g., "Developed a new feature." Be careful not to
+  over-interpret large numbers of commits or lines changed in the case of merge commits.
 - Focus on the work actually done in the period, only describing the overall
   purpose as needed for context. When the person added comments or reviews to
   an older item that was created outside the given time window, focus the summary
@@ -68,7 +81,7 @@ parentheses: the GitHub reference as repo#number, a status word (merged, open,
 closed, or draft) when known, the full URL, and the date of the work. Example:
 - Extended unit testing for the ip library. (NCEPLIBS-ip#323, merged: https://github.com/NOAA-EMC/NCEPLIBS-ip/pull/323, 2026-10-14)
 Dates for GitHub work: use the date of the person's own in-period activity the bullet
-describes (comment, review, or creation date); for several activities, give the
+describes (commit author date, comment, review, or creation date); for several activities, give the
 latest, or a range YYYY-MM-DD to YYYY-MM-DD. Never use the date of someone else's
 activity or the item's creation date when the person's work was a later comment.
 Dates for Smartsheet work: include a date ONLY if the text of the "Progress Report"

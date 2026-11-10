@@ -65,6 +65,23 @@ def render_document(
                 lines.append(f"   Assignees: {assignees}")
                 if entry.kind == "Pull request" and entry.status:
                     lines.append(f"   Status: {_clean(entry.status)}")
+                if entry.kind == "Pull request" and entry.pr_metrics is not None:
+                    metrics = entry.pr_metrics
+                    commits = metrics.period_commits
+                    lines.append(
+                        "   Whole-PR snapshot (all authors and dates, not period work): "
+                        f"{metrics.commits} commits, +{metrics.additions}/-{metrics.deletions} lines"
+                    )
+                    lines.append(
+                        "   Selected person's in-period commits (author date; summed commit churn): "
+                        f"{len(commits)} commits, +{sum(c.additions for c in commits)}"
+                        f"/-{sum(c.deletions for c in commits)} lines"
+                    )
+                    for commit in commits:
+                        lines.append(
+                            f"   Commit ({commit.authored_at.date().isoformat()}, {commit.sha}): "
+                            f"{_clean(commit.message)} (+{commit.additions}/-{commit.deletions})"
+                        )
                 if entry.authored_in_period:
                     lines.append(f"   Created: {entry.created_at.date().isoformat()}")
                     label = "Details"
@@ -93,6 +110,21 @@ def write_document(path: Path, content: str) -> Path:
     with path.open("x", encoding="utf-8") as handle:
         handle.write(content)
     return path
+
+
+def write_unique_document(path: Path, content: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    index = 1
+    while True:
+        candidate = path if index == 1 else path.with_name(f"{path.stem}-{index}{path.suffix}")
+        try:
+            handle = candidate.open("x", encoding="utf-8")
+        except FileExistsError:
+            index += 1
+            continue
+        with handle:
+            handle.write(content)
+        return candidate
 
 
 PERIOD_RE = re.compile(r"^Period: (\d{4}-\d{2}-\d{2}) to (\d{4}-\d{2}-\d{2})$", re.M)

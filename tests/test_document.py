@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 
 from cat_digest.core import Person
-from cat_digest.document import render_document, write_document
-from cat_digest.integrations import GitHubComment, GitHubEntry
+from cat_digest.document import parse_digest, render_document, write_document
+from cat_digest.integrations import GitHubComment, GitHubCommit, GitHubEntry, PullRequestMetrics
 
 
 def test_document_groups_each_person_smartsheet_before_github():
@@ -112,6 +112,41 @@ def test_document_labels_background_items_that_are_not_period_work():
     assert "Original report" in text
     assert "   Created:" not in text
     assert "Comment (2026-10-02): Update" in text
+
+
+def test_document_labels_snapshot_and_period_commit_churn():
+    users = {"a@example.com": Person("A Person", "a@example.com", "aperson")}
+    authored_at = datetime(2026, 10, 2, tzinfo=timezone.utc)
+    entry = GitHubEntry(
+        kind="Pull request", title="Old PR", url="https://github.com/x/y/pull/1",
+        created_at=datetime(2026, 8, 1, tzinfo=timezone.utc), body="Context",
+        author="other", assignees=(), comments=(), authored_in_period=False,
+        pr_metrics=PullRequestMetrics(
+            12, 100, 50, (GitHubCommit("abc", authored_at, "Fix\nworkflow", 3, 2),),
+        ),
+    )
+    text = render_document(users, {}, {"a@example.com": [entry]}, authored_at)
+    assert "Whole-PR snapshot (all authors and dates, not period work): 12 commits, +100/-50 lines" in text
+    assert "Selected person's in-period commits (author date; summed commit churn): 1 commits, +3/-2 lines" in text
+    assert "Commit (2026-10-02, abc): Fix workflow (+3/-2)" in text
+    assert "Background context only, NOT work done in this period" in text
+    sections, _ = parse_digest(text)
+    assert "Whole-PR snapshot" in sections["A Person"]
+    assert "Commit (2026-10-02, abc)" in sections["A Person"]
+
+
+def test_document_renders_zero_pr_metrics_without_adding_them_to_issues():
+    users = {"a@example.com": Person("A Person", "a@example.com", "aperson")}
+    timestamp = datetime(2026, 10, 2, tzinfo=timezone.utc)
+    pr = GitHubEntry(
+        "Pull request", "PR", "url", timestamp, "", "aperson", (), (),
+        pr_metrics=PullRequestMetrics(0, 0, 0, ()),
+    )
+    issue = GitHubEntry("Issue", "Issue", "url", timestamp, "", "aperson", (), ())
+    text = render_document(users, {}, {"a@example.com": [pr, issue]}, timestamp)
+    assert "0 commits, +0/-0 lines" in text
+    assert text.count("Whole-PR snapshot") == 1
+    assert text.count("Selected person's in-period commits") == 1
 
 
 def test_write_document_never_overwrites(tmp_path):

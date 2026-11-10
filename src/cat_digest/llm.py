@@ -14,6 +14,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .document import write_unique_document
+
 if TYPE_CHECKING:
     from importlib.resources.abc import Traversable
 
@@ -181,12 +183,30 @@ def build_prompt(config: LLMConfig, name: str, start_date: str, end_date: str) -
     )
 
 
+def prompt_text(system_prompt: str, content: str) -> str:
+    return f"{system_prompt}\n\n{content}"
+
+
+def save_prompt(path: Path, system_prompt: str, content: str, *, print_prompt: bool = False) -> Path:
+    text = prompt_text(system_prompt, content)
+    saved_path = write_unique_document(path, text)
+    LOG.info("Saved LLM prompt to %s", saved_path)
+    if print_prompt:
+        print(f"\n===== LLM prompt: {saved_path.name} =====")
+        print(text, end="" if text.endswith("\n") else "\n")
+        print(f"===== End LLM prompt: {saved_path.name} =====")
+    return saved_path
+
+
 def generate_report(
     config: LLMConfig,
     api_key: str,
     system_prompt: str,
     content: str,
     timeout: float = 180,
+    *,
+    request_path: Path | None = None,
+    print_prompt: bool = False,
 ) -> str:
     body = {
         "systemInstruction": {"parts": [{"text": system_prompt}]},
@@ -195,12 +215,18 @@ def generate_report(
     }
     if config.thinking_level:
         body["generationConfig"]["thinkingConfig"] = {"thinkingLevel": config.thinking_level}
+    LOG.debug(
+        "Gemini request model: %s; generation settings: %s",
+        config.model, json.dumps(body["generationConfig"]),
+    )
     request = urllib.request.Request(
         API_URL.format(model=config.model),
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
         method="POST",
     )
+    if request_path is not None:
+        save_prompt(request_path, system_prompt, content, print_prompt=print_prompt)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.load(response)

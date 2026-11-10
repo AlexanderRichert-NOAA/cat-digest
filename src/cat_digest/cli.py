@@ -24,6 +24,7 @@ from .llm import (
     load_llm_config,
     parse_model_spec,
     report_filename,
+    save_prompt,
 )
 
 
@@ -204,8 +205,8 @@ def get_api_token(environment_variable: str) -> str:
         "SMARTSHEET_ACCESS_TOKEN": "Smartsheet access token with access to the configured sheets",
         "GEMINI_API_KEY": "Google AI Studio API key for generating per-person reports",
         "GITHUB_TOKEN": (
-            "GitHub fine-grained PAT or App installation token with Issues: read and "
-            "Pull requests: read on the target repositories, *or* public repo read access"
+            "GitHub fine-grained PAT with 'Issues: read', 'Pull requests: read', "
+            "and 'Contents: read' permissions on the target repositories, *or* public repo read access"
         ),
     }
     token = questionary.password(
@@ -329,6 +330,16 @@ def make_parser() -> argparse.ArgumentParser:
         "(default: ~/.config/cat-digest/llm.toml over the packaged defaults).",
     )
     parser.add_argument(
+        "--llm-prompts-only",
+        action="store_true",
+        help="Save per-person LLM prompts without contacting Gemini or generating reports.",
+    )
+    parser.add_argument(
+        "--print-llm-prompts",
+        action="store_true",
+        help="Also print each saved LLM prompt to stdout.",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Show individual Smartsheet and GitHub requests and other detailed progress.",
@@ -399,6 +410,7 @@ def generate_reports(
     output_dir: Path,
     interactive: bool,
     digest_path: Path,
+    print_prompts: bool = False,
 ) -> int:
     for name, raw in sections.items():
         while True:
@@ -409,6 +421,8 @@ def generate_reports(
                     api_key,
                     build_prompt(config, name, period[0].isoformat(), period[1].isoformat()),
                     raw,
+                    request_path=output_dir / f"{Path(report_filename(name)).stem}-llm-prompt.txt",
+                    print_prompt=print_prompts,
                 )
                 write_document(output_dir / report_filename(name), report)
                 print(f"\n===== {name} =====\n{report.rstrip()}\n")
@@ -437,6 +451,25 @@ def generate_reports(
     return 0
 
 
+def save_prompts(
+    sections: dict[str, str],
+    period: tuple[date, date],
+    config: LLMConfig,
+    output_dir: Path,
+    print_prompts: bool = False,
+) -> int:
+    try:
+        for name, raw in sections.items():
+            system_prompt = build_prompt(config, name, period[0].isoformat(), period[1].isoformat())
+            path = output_dir / f"{Path(report_filename(name)).stem}-llm-prompt.txt"
+            save_prompt(path, system_prompt, raw, print_prompt=print_prompts)
+    except OSError as exc:
+        LOG.error("Could not save LLM prompt for %s: %s", name, exc)
+        return 1
+    print(f"Saved LLM prompts to {output_dir}")
+    return 0
+
+
 def summarize_existing(args: argparse.Namespace, now: datetime) -> int:
     path = args.summarize_from
     digest_path = path
@@ -458,6 +491,8 @@ def summarize_existing(args: argparse.Namespace, now: datetime) -> int:
             LOG.error("%s has no period; provide --start-date and --end-date", digest_path)
             return 1
         output_dir = digest_path.parent
+        if args.llm_prompts_only:
+            return save_prompts(sections, period, config, output_dir, args.print_llm_prompts)
         sections = {
             name: raw for name, raw in sections.items()
             if not (output_dir / report_filename(name)).exists()
@@ -472,7 +507,7 @@ def summarize_existing(args: argparse.Namespace, now: datetime) -> int:
         return 1
     return generate_reports(
         sections, period, config, api_key, output_dir,
-        sys.stdin.isatty(), digest_path,
+        sys.stdin.isatty(), digest_path, args.print_llm_prompts,
     )
 
 
@@ -510,6 +545,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = make_parser()
     args = parser.parse_args(argv)
     configure_logging(args.debug)
+    if args.llm_prompts_only and not args.llm:
+        parser.error("--llm-prompts-only cannot be combined with --no-llm")
+    if args.print_llm_prompts and not args.llm:
+        parser.error("--print-llm-prompts cannot be combined with --no-llm")
     if args.init_config:
         return init_config()
     if (code := offer_init_config(args)) is not None:
@@ -542,8 +581,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         sheets = load_sheet_urls() if include_smartsheet else []
         llm_config = load_llm_config(args.llm_config) if args.llm else None
-        gemini_key = get_api_token("GEMINI_API_KEY") if args.llm else None
-        if llm_config is not None:
+        gemini_key = None
+        if llm_config is not None and not args.llm_prompts_only:
+            gemini_key = get_api_token("GEMINI_API_KEY")
             llm_config = select_model(llm_config, gemini_key, args.model, sys.stdin.isatty())
     except (OSError, ValueError, LLMError) as exc:
         parser.error(str(exc))
@@ -590,6 +630,7 @@ def main(argv: list[str] | None = None) -> int:
                     github_token,
                     github_cutoff,
                     end_date=range_end,
+                    as_of=now,
                 )
             LOG.info(
                 "Found %d GitHub item(s)",
@@ -633,9 +674,12 @@ def main(argv: list[str] | None = None) -> int:
             include_smartsheet=include_smartsheet,
             include_github=include_github,
         )
+    if args.llm_prompts_only:
+        return save_prompts(sections, period, llm_config, output_dir, args.print_llm_prompts)
+    assert gemini_key is not None
     return generate_reports(
         sections, period, llm_config, gemini_key, output_dir,
-        sys.stdin.isatty(), output_path,
+        sys.stdin.isatty(), output_path, args.print_llm_prompts,
     )
 
 
